@@ -78,6 +78,23 @@ describe("getAllUsers()", () => {
 
     await expect(getAllUsers()).rejects.toThrow("DB connection failed");
   });
+
+  // ✨ TEST CASE ĐẶC BIỆT: Trả về rất nhiều user (large dataset)
+  it("[EDGE CASE] vẫn hoạt động đúng khi DB trả về 10,000 users", async () => {
+    const largeDataset = Array.from({ length: 10_000 }, (_, i) => ({
+      id: i + 1,
+      name: `User ${i + 1}`,
+      email: `user${i + 1}@example.com`,
+    }));
+    mockQuery.mockResolvedValueOnce([largeDataset]);
+
+    const result = await getAllUsers();
+
+    // Đảm bảo không bị mất dữ liệu và đúng số lượng
+    expect(result).toHaveLength(10_000);
+    expect(result[0]).toEqual({ id: 1, name: "User 1", email: "user1@example.com" });
+    expect(result[9_999]).toEqual({ id: 10_000, name: "User 10000", email: "user10000@example.com" });
+  });
 });
 
 // ─────────────────────────────────────────────
@@ -98,11 +115,35 @@ describe("getUserById()", () => {
   });
 
   it("trả về null khi không tìm thấy id", async () => {
-    mockQuery.mockResolvedValueOnce([[]]);
+    mockQuery.mockResolvedValueOnce([[]]); // rows rỗng
 
     const result = await getUserById(999);
 
     expect(result).toBeNull();
+  });
+
+  // ✨ TEST CASE ĐẶC BIỆT: Gọi getUserById nhiều lần liên tiếp với các id khác nhau
+  it("[EDGE CASE] nhiều lần gọi liên tiếp trả về đúng user tương ứng với từng id", async () => {
+    const userA = { id: 1, name: "An Nguyen", email: "an@example.com" };
+    const userB = { id: 2, name: "Binh Tran", email: "binh@example.com" };
+    const userC = { id: 3, name: "Chi Le", email: "chi@example.com" };
+
+    // Chain 3 kết quả theo đúng thứ tự gọi
+    mockQuery
+      .mockResolvedValueOnce([[userA]])
+      .mockResolvedValueOnce([[userB]])
+      .mockResolvedValueOnce([[userC]]);
+
+    const [r1, r2, r3] = await Promise.all([
+      getUserById(1),
+      getUserById(2),
+      getUserById(3),
+    ]);
+
+    expect(r1).toEqual(userA);
+    expect(r2).toEqual(userB);
+    expect(r3).toEqual(userC);
+    expect(mockQuery).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -135,6 +176,22 @@ describe("createUser()", () => {
       createUser({ name: "Chi Le", email: "chi@example.com" }),
     ).rejects.toThrow("Duplicate entry");
   });
+
+  // ✨ TEST CASE ĐẶC BIỆT: Tạo user với tên và email có ký tự đặc biệt
+  it("[EDGE CASE] tạo user với tên chứa ký tự Unicode và email dài bất thường", async () => {
+    const specialName = "Nguyễn Văn Ánh 🌟";
+    const longEmail = `${ "a".repeat(64) }@${ "b".repeat(63) }.com`; // gần giới hạn RFC 5321
+
+    mockQuery.mockResolvedValueOnce([{ insertId: 99 }]);
+
+    const result = await createUser({ name: specialName, email: longEmail });
+
+    expect(result).toEqual({ insertId: 99 });
+    expect(mockQuery).toHaveBeenCalledWith(
+      "INSERT INTO users (name, email) VALUES (?, ?)",
+      [specialName, longEmail],
+    );
+  });
 });
 
 // ─────────────────────────────────────────────
@@ -163,6 +220,15 @@ describe("updateUser()", () => {
 
     expect(result).toEqual({ affectedRows: 0 });
   });
+
+  // ✨ TEST CASE ĐẶC BIỆT: DB timeout khi update
+  it("[EDGE CASE] ném lỗi timeout khi DB không phản hồi trong lúc update", async () => {
+    mockQuery.mockRejectedValueOnce(new Error("ER_LOCK_WAIT_TIMEOUT: Lock wait timeout exceeded"));
+
+    await expect(
+      updateUser(1, { name: "Timeout", email: "timeout@test.com" })
+    ).rejects.toThrow("ER_LOCK_WAIT_TIMEOUT");
+  });
 });
 
 // ─────────────────────────────────────────────
@@ -187,5 +253,21 @@ describe("deleteUser()", () => {
     const result = await deleteUser(999);
 
     expect(result).toEqual({ affectedRows: 0 });
+  });
+
+  // ✨ TEST CASE ĐẶC BIỆT: Xóa user có foreign key constraint
+  it("[EDGE CASE] ném lỗi foreign key constraint khi user đang liên kết với bảng khác", async () => {
+    const fkError = new Error(
+      "ER_ROW_IS_REFERENCED_2: Cannot delete or update a parent row: a foreign key constraint fails"
+    );
+    mockQuery.mockRejectedValueOnce(fkError);
+
+    await expect(deleteUser(1)).rejects.toThrow("ER_ROW_IS_REFERENCED_2");
+
+    // Xác nhận query vẫn được gọi đúng
+    expect(mockQuery).toHaveBeenCalledWith(
+      "DELETE FROM users WHERE id = ?",
+      [1],
+    );
   });
 });
